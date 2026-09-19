@@ -1,5 +1,9 @@
 package com.aman.firstclubmembership2.service;
 
+import com.aman.firstclubmembership2.benefit.FreeDeliveryBenefit;
+import com.aman.firstclubmembership2.benefit.MembershipBenefit;
+import com.aman.firstclubmembership2.benefit.PercentageDiscountBenefit;
+import com.aman.firstclubmembership2.benefit.PrioritySupportBenefit;
 import com.aman.firstclubmembership2.config.CatalogSeeder;
 import com.aman.firstclubmembership2.domain.MembershipPlan;
 import com.aman.firstclubmembership2.domain.MembershipTier;
@@ -8,6 +12,8 @@ import com.aman.firstclubmembership2.enums.BillingCycle;
 import com.aman.firstclubmembership2.enums.SubscriptionStatus;
 import com.aman.firstclubmembership2.enums.TierLevel;
 import com.aman.firstclubmembership2.exception.PaymentFailedException;
+import com.aman.firstclubmembership2.model.OrderBenefitsResult;
+import com.aman.firstclubmembership2.model.OrderContext;
 import com.aman.firstclubmembership2.model.UserMetrics;
 import com.aman.firstclubmembership2.repository.InMemoryPaymentLogRepository;
 import com.aman.firstclubmembership2.repository.InMemoryPlanRepository;
@@ -357,5 +363,104 @@ class MembershipServiceTest {
         service.cancelSubscription("USER_1");
 
         assertFalse(service.evaluateAndUpdateUserTier(metrics(6, "2500.00")).isPresent());
+    }
+
+    // ---------------------------------------------------------------
+    // Membership Benefits: configurable catalog + evaluation
+    // ---------------------------------------------------------------
+
+    private static OrderContext order(String subtotal, String category, String standardDeliveryFee,
+                                       boolean isExclusiveDeal, boolean isPrioritySupportRequested) {
+        return new OrderContext(new BigDecimal(subtotal), category, new BigDecimal(standardDeliveryFee),
+                isExclusiveDeal, isPrioritySupportRequested);
+    }
+
+    @Test
+    void getBenefits_noActiveSubscription_returnsEmptyList() {
+        assertTrue(service.getBenefits("USER_1").isEmpty());
+    }
+
+    @Test
+    void getBenefits_returnsTheSubscribedTiersConfiguredBenefits() {
+        service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.PLATINUM, "CREDIT_CARD");
+
+        List<MembershipBenefit> benefits = service.getBenefits("USER_1");
+
+        assertTrue(benefits.stream().anyMatch(b -> b instanceof PercentageDiscountBenefit));
+        assertTrue(benefits.stream().anyMatch(b -> b instanceof FreeDeliveryBenefit));
+        assertTrue(benefits.stream().anyMatch(b -> b instanceof PrioritySupportBenefit));
+    }
+
+    @Test
+    void getBenefits_afterCancellation_returnsEmptyList() {
+        service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.GOLD, "CREDIT_CARD");
+        service.cancelSubscription("USER_1");
+
+        assertTrue(service.getBenefits("USER_1").isEmpty());
+    }
+
+    @Test
+    void evaluateBenefits_silver_flatDiscountOnAnyCategoryNoFreeDelivery() {
+        service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER, "CREDIT_CARD");
+
+        OrderBenefitsResult result = service.evaluateBenefits("USER_1", order("1000.00", "GROCERY", "40.00", false, false));
+
+        assertEquals(new BigDecimal("50.00"), result.getDiscountAmount());
+        assertEquals(new BigDecimal("40.00"), result.getDeliveryFee());
+        assertFalse(result.isEarlyAccessGranted());
+        assertFalse(result.isPrioritySupportGranted());
+    }
+
+    @Test
+    void evaluateBenefits_gold_discountOnlyOnConfiguredCategories() {
+        service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.GOLD, "CREDIT_CARD");
+
+        OrderBenefitsResult electronics = service.evaluateBenefits("USER_1", order("1000.00", "ELECTRONICS", "40.00", false, false));
+        assertEquals(new BigDecimal("100.00"), electronics.getDiscountAmount());
+
+        OrderBenefitsResult grocery = service.evaluateBenefits("USER_1", order("1000.00", "GROCERY", "40.00", false, false));
+        assertEquals(BigDecimal.ZERO, grocery.getDiscountAmount());
+    }
+
+    @Test
+    void evaluateBenefits_gold_freeDeliveryOnlyAboveThreshold() {
+        service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.GOLD, "CREDIT_CARD");
+
+        OrderBenefitsResult belowThreshold = service.evaluateBenefits("USER_1", order("100.00", "GROCERY", "40.00", false, false));
+        assertEquals(new BigDecimal("40.00"), belowThreshold.getDeliveryFee());
+
+        OrderBenefitsResult atThreshold = service.evaluateBenefits("USER_1", order("499.00", "GROCERY", "40.00", false, false));
+        assertEquals(BigDecimal.ZERO, atThreshold.getDeliveryFee());
+    }
+
+    @Test
+    void evaluateBenefits_platinum_alwaysFreeDeliveryAndGrantsEntitlementsWhenRequested() {
+        service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.PLATINUM, "CREDIT_CARD");
+
+        OrderBenefitsResult result = service.evaluateBenefits("USER_1", order("10.00", "GROCERY", "40.00", true, true));
+
+        assertEquals(BigDecimal.ZERO, result.getDeliveryFee());
+        assertTrue(result.isEarlyAccessGranted());
+        assertTrue(result.isPrioritySupportGranted());
+    }
+
+    @Test
+    void evaluateBenefits_entitlementsNotGrantedWhenNotRequested() {
+        service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.PLATINUM, "CREDIT_CARD");
+
+        OrderBenefitsResult result = service.evaluateBenefits("USER_1", order("10.00", "GROCERY", "40.00", false, false));
+
+        assertFalse(result.isEarlyAccessGranted());
+        assertFalse(result.isPrioritySupportGranted());
+    }
+
+    @Test
+    void evaluateBenefits_noActiveSubscription_grantsNothing() {
+        OrderBenefitsResult result = service.evaluateBenefits("USER_1", order("1000.00", "ELECTRONICS", "40.00", true, true));
+
+        assertEquals(BigDecimal.ZERO, result.getDiscountAmount());
+        assertEquals(new BigDecimal("40.00"), result.getDeliveryFee(), "standard fee passes through untouched");
+        assertFalse(result.isEarlyAccessGranted());
+        assertFalse(result.isPrioritySupportGranted());
     }
 }

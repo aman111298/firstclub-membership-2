@@ -1,5 +1,9 @@
 package com.aman.firstclubmembership2.config;
 
+import com.aman.firstclubmembership2.benefit.EarlyAccessBenefit;
+import com.aman.firstclubmembership2.benefit.FreeDeliveryBenefit;
+import com.aman.firstclubmembership2.benefit.PercentageDiscountBenefit;
+import com.aman.firstclubmembership2.benefit.PrioritySupportBenefit;
 import com.aman.firstclubmembership2.domain.MembershipPlan;
 import com.aman.firstclubmembership2.domain.MembershipTier;
 import com.aman.firstclubmembership2.enums.BillingCycle;
@@ -13,8 +17,9 @@ import com.aman.firstclubmembership2.store.IdGenerator;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Set;
 
-/** Seeds the demo catalog (plans, tiers, criteria) shared by {@code Application} and tests. */
+/** Seeds the demo catalog (plans, tiers, criteria, benefits) shared by {@code Application} and tests. */
 public final class CatalogSeeder {
 
     public static final String MONTHLY_PLAN_ID = "PLAN_MONTHLY";
@@ -40,23 +45,37 @@ public final class CatalogSeeder {
     }
 
     private static void seedTiers(TierRepository tierRepository, IdGenerator idGenerator) {
-        // Silver: default baseline tier, no rules required
+        // Silver: default baseline tier, no rules required. Flat discount, no free delivery.
         tierRepository.save(new MembershipTier(
                 idGenerator.nextTierId(), TierLevel.SILVER, "Silver Member",
-                List.of("5% Discount"), List.of()
+                List.of(
+                        new PercentageDiscountBenefit(new BigDecimal("5"), Set.of())
+                ),
+                List.of()
         ));
 
-        // Gold: requires >= 5 orders OR >= $2000 total order value (any one rule qualifies)
+        // Gold: requires >= 5 orders OR >= $2000 total order value (any one rule qualifies).
+        // Discount restricted to selected categories; free delivery above a minimum order value.
         tierRepository.save(new MembershipTier(
                 idGenerator.nextTierId(), TierLevel.GOLD, "Gold Member",
-                List.of("10% Discount", "Free Delivery"),
+                List.of(
+                        new PercentageDiscountBenefit(new BigDecimal("10"), Set.of("ELECTRONICS", "FASHION")),
+                        new FreeDeliveryBenefit(new BigDecimal("499.00")),
+                        new EarlyAccessBenefit()
+                ),
                 List.of(new OrderCountRule(5), new OrderValueRule(new BigDecimal("2000.00")))
         ));
 
-        // Platinum: requires >= 15 orders OR "VIP_CLUB" cohort tag
+        // Platinum: requires >= 15 orders OR "VIP_CLUB" cohort tag.
+        // Best discount on all categories, always-free delivery, and the entitlement-only perks.
         tierRepository.save(new MembershipTier(
                 idGenerator.nextTierId(), TierLevel.PLATINUM, "Platinum Member",
-                List.of("20% Discount", "Free Delivery", "Priority Support"),
+                List.of(
+                        new PercentageDiscountBenefit(new BigDecimal("20"), Set.of()),
+                        new FreeDeliveryBenefit(),
+                        new EarlyAccessBenefit(),
+                        new PrioritySupportBenefit()
+                ),
                 List.of(new OrderCountRule(15), new CohortRule("VIP_CLUB"))
         ));
     }

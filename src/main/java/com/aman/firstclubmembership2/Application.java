@@ -3,6 +3,8 @@ package com.aman.firstclubmembership2;
 import com.aman.firstclubmembership2.config.CatalogSeeder;
 import com.aman.firstclubmembership2.domain.UserSubscription;
 import com.aman.firstclubmembership2.enums.TierLevel;
+import com.aman.firstclubmembership2.model.OrderBenefitsResult;
+import com.aman.firstclubmembership2.model.OrderContext;
 import com.aman.firstclubmembership2.model.UserMetrics;
 import com.aman.firstclubmembership2.repository.InMemoryPaymentLogRepository;
 import com.aman.firstclubmembership2.repository.InMemoryPlanRepository;
@@ -55,7 +57,17 @@ public class Application {
             System.out.println("End Date: " + userSub.getEndDate());
         });
 
-        section("5. CANCEL SUBSCRIPTION");
+        section("5. MEMBERSHIP BENEFITS FOR CURRENT TIER (PLATINUM)");
+        System.out.println("Configured benefits: " + service.getBenefits("USER_101"));
+        OrderContext order = new OrderContext(new BigDecimal("50.00"), "ELECTRONICS", new BigDecimal("40.00"), true, true);
+        OrderBenefitsResult benefitsResult = service.evaluateBenefits("USER_101", order);
+        System.out.println("Order: $50.00 subtotal, ELECTRONICS, exclusive deal, priority support requested");
+        System.out.println("Discount amount: $" + benefitsResult.getDiscountAmount());
+        System.out.println("Delivery fee: $" + benefitsResult.getDeliveryFee());
+        System.out.println("Early access granted: " + benefitsResult.isEarlyAccessGranted());
+        System.out.println("Priority support granted: " + benefitsResult.isPrioritySupportGranted());
+
+        section("6. CANCEL SUBSCRIPTION");
         service.cancelSubscription("USER_101");
         System.out.println("Is Expired/Cancelled: " + service.getSubscription("USER_101").get().isExpired());
     }

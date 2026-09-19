@@ -1,5 +1,6 @@
 package com.aman.firstclubmembership2.domain;
 
+import com.aman.firstclubmembership2.benefit.MembershipBenefit;
 import com.aman.firstclubmembership2.enums.TierLevel;
 import com.aman.firstclubmembership2.model.UserMetrics;
 import com.aman.firstclubmembership2.rule.TierQualificationRule;
@@ -11,15 +12,15 @@ public class MembershipTier {
     private final String tierId;
     private final TierLevel level;
     private final String name;
-    private final List<String> perks;
+    private final List<MembershipBenefit> benefits;
     private final List<TierQualificationRule> qualificationRules;
 
-    public MembershipTier(String tierId, TierLevel level, String name, List<String> perks,
+    public MembershipTier(String tierId, TierLevel level, String name, List<MembershipBenefit> benefits,
                            List<TierQualificationRule> qualificationRules) {
         this.tierId = tierId;
         this.level = level;
         this.name = name;
-        this.perks = List.copyOf(perks);
+        this.benefits = List.copyOf(benefits);
         this.qualificationRules = List.copyOf(qualificationRules);
     }
 
@@ -43,8 +44,8 @@ public class MembershipTier {
         return name;
     }
 
-    public List<String> getPerks() {
-        return perks;
+    public List<MembershipBenefit> getBenefits() {
+        return benefits;
     }
 
     public List<TierQualificationRule> getQualificationRules() {

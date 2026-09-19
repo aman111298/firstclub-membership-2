@@ -21,7 +21,7 @@ class MembershipTierTest {
 
     @Test
     void tierWithNoRules_alwaysQualifies() {
-        MembershipTier silver = new MembershipTier("tier_1", TierLevel.SILVER, "Silver", List.of("5% Discount"), List.of());
+        MembershipTier silver = new MembershipTier("tier_1", TierLevel.SILVER, "Silver", List.of(), List.of());
 
         assertTrue(silver.qualifies(metrics(0, "0.00")));
         assertTrue(silver.qualifies(null));
@@ -29,7 +29,7 @@ class MembershipTierTest {
 
     @Test
     void tierWithMultipleRules_qualifiesIfAnyOnePasses() {
-        MembershipTier gold = new MembershipTier("tier_2", TierLevel.GOLD, "Gold", List.of("10% Discount"),
+        MembershipTier gold = new MembershipTier("tier_2", TierLevel.GOLD, "Gold", List.of(),
                 List.of(new OrderCountRule(5), new OrderValueRule(new BigDecimal("2000.00"))));
 
         assertTrue(gold.qualifies(metrics(5, "2000.00")), "meets both rules");

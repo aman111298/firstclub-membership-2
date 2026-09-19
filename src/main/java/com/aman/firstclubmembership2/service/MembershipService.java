@@ -1,11 +1,14 @@
 package com.aman.firstclubmembership2.service;
 
+import com.aman.firstclubmembership2.benefit.MembershipBenefit;
 import com.aman.firstclubmembership2.domain.MembershipPlan;
 import com.aman.firstclubmembership2.domain.MembershipTier;
 import com.aman.firstclubmembership2.domain.UserSubscription;
 import com.aman.firstclubmembership2.enums.SubscriptionStatus;
 import com.aman.firstclubmembership2.enums.TierLevel;
 import com.aman.firstclubmembership2.exception.PaymentFailedException;
+import com.aman.firstclubmembership2.model.OrderBenefitsResult;
+import com.aman.firstclubmembership2.model.OrderContext;
 import com.aman.firstclubmembership2.model.PaymentContext;
 import com.aman.firstclubmembership2.model.UserMetrics;
 import com.aman.firstclubmembership2.repository.PaymentLogRepository;
@@ -18,6 +21,7 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -209,5 +213,32 @@ public class MembershipService {
         // Marks the subscription CANCELLED; endDate is left untouched
         sub.cancel();
         System.out.printf("[SUBSCRIPTION LOG] Cancelled subscription %s for user %s%n", sub.getSubscriptionId(), userId);
+    }
+
+    // ---------------------------------------------------------------
+    // Membership Benefits: configurable catalog + evaluation
+    // ---------------------------------------------------------------
+
+    /** Returns the configured benefit strategies for the user's current tier, or an empty list if not subscribed. */
+    public List<MembershipBenefit> getBenefits(String userId) {
+        return resolveBenefits(userId);
+    }
+
+    /**
+     * Runs every benefit the user's tier grants against one order context, accumulating their
+     * combined effect (discount, delivery fee, entitlement flags) into a single result.
+     */
+    public OrderBenefitsResult evaluateBenefits(String userId, OrderContext context) {
+        OrderBenefitsResult result = new OrderBenefitsResult(context.standardDeliveryFee());
+        resolveBenefits(userId).forEach(benefit -> benefit.apply(context, result));
+        return result;
+    }
+
+    private List<MembershipBenefit> resolveBenefits(String userId) {
+        return subscriptionRepository.findActiveByUserId(userId)
+                .filter(sub -> !sub.isExpired())
+                .flatMap(sub -> tierRepository.findByLevel(sub.getTierLevel()))
+                .map(MembershipTier::getBenefits)
+                .orElse(List.of());
     }
 }
