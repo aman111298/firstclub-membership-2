@@ -96,6 +96,9 @@ public class MembershipService {
     }
 
     public TierLevel evaluateEligibleTier(UserMetrics metrics) {
+        // Among all tiers whose rules these metrics satisfy, pick the highest-ranked one
+        // (e.g. a user who qualifies for both Gold and Platinum lands on Platinum).
+        // No tier's rules pass -> fall back to Silver, the baseline tier.
         return dataStore.tiers.values().stream()
                 .filter(tier -> tier.qualifies(metrics))
                 .map(MembershipTier::getLevel)
