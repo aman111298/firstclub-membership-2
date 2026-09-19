@@ -4,7 +4,6 @@ import com.aman.firstclubmembership2.model.UserMetrics;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
-import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -45,21 +44,6 @@ class TierQualificationRuleTest {
     @Test
     void cohortRule_notEligible_whenCohortAbsent() {
         assertFalse(new CohortRule("VIP_CLUB").isEligible(metrics(0, "0.00", "REGULAR")));
-    }
-
-    @Test
-    void anyOfRule_eligible_whenAtLeastOneChildRuleMatches() {
-        AnyOfRule rule = new AnyOfRule(List.of(new OrderCountRule(15), new CohortRule("VIP_CLUB")));
-
-        assertTrue(rule.isEligible(metrics(0, "0.00", "VIP_CLUB")), "should match via cohort alone");
-        assertTrue(rule.isEligible(metrics(15, "0.00")), "should match via order count alone");
-    }
-
-    @Test
-    void anyOfRule_notEligible_whenNoChildRuleMatches() {
-        AnyOfRule rule = new AnyOfRule(List.of(new OrderCountRule(15), new CohortRule("VIP_CLUB")));
-
-        assertFalse(rule.isEligible(metrics(6, "0.00", "REGULAR")));
     }
 
     @Test

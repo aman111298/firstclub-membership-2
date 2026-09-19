@@ -4,8 +4,16 @@ import com.aman.firstclubmembership2.config.CatalogSeeder;
 import com.aman.firstclubmembership2.domain.UserSubscription;
 import com.aman.firstclubmembership2.enums.TierLevel;
 import com.aman.firstclubmembership2.model.UserMetrics;
+import com.aman.firstclubmembership2.repository.InMemoryPaymentLogRepository;
+import com.aman.firstclubmembership2.repository.InMemoryPlanRepository;
+import com.aman.firstclubmembership2.repository.InMemorySubscriptionRepository;
+import com.aman.firstclubmembership2.repository.InMemoryTierRepository;
+import com.aman.firstclubmembership2.repository.PaymentLogRepository;
+import com.aman.firstclubmembership2.repository.PlanRepository;
+import com.aman.firstclubmembership2.repository.SubscriptionRepository;
+import com.aman.firstclubmembership2.repository.TierRepository;
 import com.aman.firstclubmembership2.service.MembershipService;
-import com.aman.firstclubmembership2.store.DataStore;
+import com.aman.firstclubmembership2.store.IdGenerator;
 
 import java.math.BigDecimal;
 import java.util.Set;
@@ -13,10 +21,16 @@ import java.util.Set;
 public class Application {
 
     public static void main(String[] args) {
-        DataStore dataStore = new DataStore();
-        MembershipService service = new MembershipService(dataStore);
+        IdGenerator idGenerator = new IdGenerator();
+        PlanRepository planRepository = new InMemoryPlanRepository();
+        TierRepository tierRepository = new InMemoryTierRepository();
+        SubscriptionRepository subscriptionRepository = new InMemorySubscriptionRepository();
+        PaymentLogRepository paymentLogRepository = new InMemoryPaymentLogRepository();
 
-        CatalogSeeder.seed(dataStore);
+        CatalogSeeder.seed(planRepository, tierRepository, idGenerator);
+
+        MembershipService service = new MembershipService(
+                planRepository, tierRepository, subscriptionRepository, paymentLogRepository, idGenerator);
 
         section("1. USER INITIAL SUBSCRIPTION");
         UserMetrics initialMetrics = new UserMetrics("USER_101", 2, new BigDecimal("300.00"), Set.of("REGULAR"));

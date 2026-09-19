@@ -9,7 +9,15 @@ import com.aman.firstclubmembership2.enums.SubscriptionStatus;
 import com.aman.firstclubmembership2.enums.TierLevel;
 import com.aman.firstclubmembership2.exception.PaymentFailedException;
 import com.aman.firstclubmembership2.model.UserMetrics;
-import com.aman.firstclubmembership2.store.DataStore;
+import com.aman.firstclubmembership2.repository.InMemoryPaymentLogRepository;
+import com.aman.firstclubmembership2.repository.InMemoryPlanRepository;
+import com.aman.firstclubmembership2.repository.InMemorySubscriptionRepository;
+import com.aman.firstclubmembership2.repository.InMemoryTierRepository;
+import com.aman.firstclubmembership2.repository.PaymentLogRepository;
+import com.aman.firstclubmembership2.repository.PlanRepository;
+import com.aman.firstclubmembership2.repository.SubscriptionRepository;
+import com.aman.firstclubmembership2.repository.TierRepository;
+import com.aman.firstclubmembership2.store.IdGenerator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -27,14 +35,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MembershipServiceTest {
 
-    private DataStore dataStore;
+    private IdGenerator idGenerator;
+    private PlanRepository planRepository;
+    private TierRepository tierRepository;
+    private SubscriptionRepository subscriptionRepository;
+    private PaymentLogRepository paymentLogRepository;
     private MembershipService service;
 
     @BeforeEach
     void setUp() {
-        dataStore = new DataStore();
-        CatalogSeeder.seed(dataStore);
-        service = new MembershipService(dataStore);
+        idGenerator = new IdGenerator();
+        planRepository = new InMemoryPlanRepository();
+        tierRepository = new InMemoryTierRepository();
+        subscriptionRepository = new InMemorySubscriptionRepository();
+        paymentLogRepository = new InMemoryPaymentLogRepository();
+
+        CatalogSeeder.seed(planRepository, tierRepository, idGenerator);
+
+        service = new MembershipService(planRepository, tierRepository, subscriptionRepository, paymentLogRepository, idGenerator);
     }
 
     private static UserMetrics metrics(int orderCount, String orderValue, String... cohorts) {
@@ -113,12 +131,12 @@ class MembershipServiceTest {
     @Test
     void subscribe_tierNotConfiguredInCatalog_throwsIllegalArgumentException() {
         // A catalog where only SILVER has been configured - GOLD is a valid enum value but not an offered tier.
-        DataStore sparseStore = new DataStore();
-        sparseStore.plans.put(CatalogSeeder.MONTHLY_PLAN_ID,
-                new MembershipPlan(CatalogSeeder.MONTHLY_PLAN_ID, "Monthly Pass", BillingCycle.MONTHLY, new BigDecimal("199.00")));
-        sparseStore.tiers.put(TierLevel.SILVER.name(),
-                new MembershipTier(sparseStore.idGenerator.nextTierId(), TierLevel.SILVER, "Silver", List.of(), List.of()));
-        MembershipService sparseService = new MembershipService(sparseStore);
+        PlanRepository sparsePlans = new InMemoryPlanRepository();
+        sparsePlans.save(new MembershipPlan(CatalogSeeder.MONTHLY_PLAN_ID, "Monthly Pass", BillingCycle.MONTHLY, new BigDecimal("199.00")));
+        TierRepository sparseTiers = new InMemoryTierRepository();
+        sparseTiers.save(new MembershipTier(idGenerator.nextTierId(), TierLevel.SILVER, "Silver", List.of(), List.of()));
+        MembershipService sparseService = new MembershipService(
+                sparsePlans, sparseTiers, new InMemorySubscriptionRepository(), new InMemoryPaymentLogRepository(), idGenerator);
 
         assertThrows(IllegalArgumentException.class,
                 () -> sparseService.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.GOLD, "CREDIT_CARD"));
@@ -144,15 +162,11 @@ class MembershipServiceTest {
 
     @Test
     void subscribe_paymentFails_throwsPaymentFailedExceptionAndDoesNotCreateSubscription() {
-        DataStore storeWithBadPricing = new DataStore();
-        CatalogSeeder.seed(storeWithBadPricing);
-        storeWithBadPricing.plans.put("PLAN_BROKEN",
-                new MembershipPlan("PLAN_BROKEN", "Broken Plan", BillingCycle.MONTHLY, new BigDecimal("-1.00")));
-        MembershipService storeService = new MembershipService(storeWithBadPricing);
+        planRepository.save(new MembershipPlan("PLAN_BROKEN", "Broken Plan", BillingCycle.MONTHLY, new BigDecimal("-1.00")));
 
         assertThrows(PaymentFailedException.class,
-                () -> storeService.subscribe("USER_1", "PLAN_BROKEN", TierLevel.SILVER, "CREDIT_CARD"));
-        assertTrue(storeService.getSubscription("USER_1").isEmpty());
+                () -> service.subscribe("USER_1", "PLAN_BROKEN", TierLevel.SILVER, "CREDIT_CARD"));
+        assertTrue(service.getSubscription("USER_1").isEmpty());
     }
 
     /**
@@ -277,14 +291,19 @@ class MembershipServiceTest {
     }
 
     @Test
-    void evaluateEligibleTier_orderCountAndValueMet_returnsGold() {
+    void evaluateEligibleTier_orderCountAndValueBothMet_returnsGold() {
         assertEquals(TierLevel.GOLD, service.evaluateEligibleTier(metrics(5, "2000.00")));
     }
 
     @Test
-    void evaluateEligibleTier_onlyOrderCountMet_staysAtSilver() {
-        // Gold requires count AND value; count alone isn't enough.
-        assertEquals(TierLevel.SILVER, service.evaluateEligibleTier(metrics(5, "0.00")));
+    void evaluateEligibleTier_onlyOrderCountMet_returnsGold() {
+        // Gold's rules are OR'd: count alone is enough, value isn't required too.
+        assertEquals(TierLevel.GOLD, service.evaluateEligibleTier(metrics(5, "0.00")));
+    }
+
+    @Test
+    void evaluateEligibleTier_onlyOrderValueMet_returnsGold() {
+        assertEquals(TierLevel.GOLD, service.evaluateEligibleTier(metrics(0, "2000.00")));
     }
 
     @Test

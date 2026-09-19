@@ -23,12 +23,12 @@ public class MembershipTier {
         this.qualificationRules = List.copyOf(qualificationRules);
     }
 
-    /** Returns true if every rule defined for this tier is satisfied. */
+    /** Returns true if at least one rule defined for this tier is satisfied (OR basis). */
     public boolean qualifies(UserMetrics metrics) {
         if (qualificationRules.isEmpty()) {
             return true; // Default baseline tier
         }
-        return qualificationRules.stream().allMatch(rule -> rule.isEligible(metrics));
+        return qualificationRules.stream().anyMatch(rule -> rule.isEligible(metrics));
     }
 
     public String getTierId() {

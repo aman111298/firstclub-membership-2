@@ -28,12 +28,13 @@ class MembershipTierTest {
     }
 
     @Test
-    void tierWithMultipleRules_requiresAllToPass() {
+    void tierWithMultipleRules_qualifiesIfAnyOnePasses() {
         MembershipTier gold = new MembershipTier("tier_2", TierLevel.GOLD, "Gold", List.of("10% Discount"),
                 List.of(new OrderCountRule(5), new OrderValueRule(new BigDecimal("2000.00"))));
 
         assertTrue(gold.qualifies(metrics(5, "2000.00")), "meets both rules");
-        assertFalse(gold.qualifies(metrics(5, "1999.99")), "fails the value rule only");
-        assertFalse(gold.qualifies(metrics(4, "2000.00")), "fails the count rule only");
+        assertTrue(gold.qualifies(metrics(5, "0.00")), "meets the count rule alone");
+        assertTrue(gold.qualifies(metrics(0, "2000.00")), "meets the value rule alone");
+        assertFalse(gold.qualifies(metrics(4, "1999.99")), "meets neither rule");
     }
 }
