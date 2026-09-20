@@ -4,6 +4,7 @@ import com.aman.firstclubmembership2.benefit.FreeDeliveryBenefit;
 import com.aman.firstclubmembership2.benefit.MembershipBenefit;
 import com.aman.firstclubmembership2.benefit.PercentageDiscountBenefit;
 import com.aman.firstclubmembership2.benefit.PrioritySupportBenefit;
+import com.aman.firstclubmembership2.concurrency.UserLockManager;
 import com.aman.firstclubmembership2.config.CatalogSeeder;
 import com.aman.firstclubmembership2.domain.MembershipPlan;
 import com.aman.firstclubmembership2.domain.MembershipTier;
@@ -46,6 +47,7 @@ class MembershipServiceTest {
     private TierRepository tierRepository;
     private SubscriptionRepository subscriptionRepository;
     private PaymentLogRepository paymentLogRepository;
+    private UserLockManager userLockManager;
     private MembershipService service;
 
     @BeforeEach
@@ -55,10 +57,11 @@ class MembershipServiceTest {
         tierRepository = new InMemoryTierRepository();
         subscriptionRepository = new InMemorySubscriptionRepository();
         paymentLogRepository = new InMemoryPaymentLogRepository();
+        userLockManager = new UserLockManager();
 
         CatalogSeeder.seed(planRepository, tierRepository, idGenerator);
 
-        service = new MembershipService(planRepository, tierRepository, subscriptionRepository, paymentLogRepository, idGenerator);
+        service = new MembershipService(planRepository, tierRepository, subscriptionRepository, paymentLogRepository, idGenerator, userLockManager);
     }
 
     private static UserMetrics metrics(int orderCount, String orderValue, String... cohorts) {
@@ -142,7 +145,7 @@ class MembershipServiceTest {
         TierRepository sparseTiers = new InMemoryTierRepository();
         sparseTiers.save(new MembershipTier(idGenerator.nextTierId(), TierLevel.SILVER, "Silver", List.of(), List.of()));
         MembershipService sparseService = new MembershipService(
-                sparsePlans, sparseTiers, new InMemorySubscriptionRepository(), new InMemoryPaymentLogRepository(), idGenerator);
+                sparsePlans, sparseTiers, new InMemorySubscriptionRepository(), new InMemoryPaymentLogRepository(), idGenerator, userLockManager);
 
         assertThrows(IllegalArgumentException.class,
                 () -> sparseService.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.GOLD, "CREDIT_CARD"));

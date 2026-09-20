@@ -1,6 +1,7 @@
 package com.aman.firstclubmembership2.service;
 
 import com.aman.firstclubmembership2.benefit.MembershipBenefit;
+import com.aman.firstclubmembership2.concurrency.UserLockManager;
 import com.aman.firstclubmembership2.domain.MembershipPlan;
 import com.aman.firstclubmembership2.domain.MembershipTier;
 import com.aman.firstclubmembership2.domain.UserSubscription;
@@ -24,6 +25,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class MembershipService {
 
@@ -35,17 +37,20 @@ public class MembershipService {
     private final SubscriptionRepository subscriptionRepository;
     private final PaymentLogRepository paymentLogRepository;
     private final IdGenerator idGenerator;
+    private final UserLockManager userLockManager;
 
     public MembershipService(PlanRepository planRepository,
                               TierRepository tierRepository,
                               SubscriptionRepository subscriptionRepository,
                               PaymentLogRepository paymentLogRepository,
-                              IdGenerator idGenerator) {
+                              IdGenerator idGenerator,
+                              UserLockManager userLockManager) {
         this.planRepository = planRepository;
         this.tierRepository = tierRepository;
         this.subscriptionRepository = subscriptionRepository;
         this.paymentLogRepository = paymentLogRepository;
         this.idGenerator = idGenerator;
+        this.userLockManager = userLockManager;
     }
 
     /** Returns every plan and tier in the catalog, for the user to choose a plan + tier from. */
@@ -57,45 +62,54 @@ public class MembershipService {
     }
 
     public UserSubscription subscribe(String userId, String planId, TierLevel tierLevel, String paymentMethod) {
-        // Validate the plan exists
-        MembershipPlan plan = planRepository.findById(planId)
-                .orElseThrow(() -> new IllegalArgumentException("Invalid Plan ID: " + planId));
+        // The whole check-then-act sequence (existing-subscription check, payment, create + save)
+        // must run under this user's lock, or two concurrent calls could both pass the check
+        // and both charge/create a subscription before either writes.
+        ReentrantLock lock = userLockManager.lockFor(userId);
+        lock.lock();
+        try {
+            // Validate the plan exists
+            MembershipPlan plan = planRepository.findById(planId)
+                    .orElseThrow(() -> new IllegalArgumentException("Invalid Plan ID: " + planId));
 
-        // Validate the tier is one the catalog actually offers
-        if (tierRepository.findByLevel(tierLevel).isEmpty()) {
-            throw new IllegalArgumentException("Invalid Tier Level: " + tierLevel);
+            // Validate the tier is one the catalog actually offers
+            if (tierRepository.findByLevel(tierLevel).isEmpty()) {
+                throw new IllegalArgumentException("Invalid Tier Level: " + tierLevel);
+            }
+
+            // A user may only have one usable subscription at a time; a past (expired/cancelled)
+            // one does not block a new subscribe call
+            Optional<UserSubscription> existingSub = subscriptionRepository.findActiveByUserId(userId);
+            if (existingSub.isPresent() && !existingSub.get().isExpired()) {
+                throw new IllegalStateException("User already has an active subscription: " + existingSub.get().getSubscriptionId());
+            }
+
+            // Execute payment
+            PaymentContext paymentContext = processPayment(userId, plan.getPrice(), paymentMethod, "Subscribe to " + plan.getName());
+
+            // Guard: payment must succeed before the subscription is created
+            if (!PAYMENT_SUCCESS.equalsIgnoreCase(paymentContext.status())) {
+                throw new PaymentFailedException("Subscription failed: Payment processing failed for user " + userId);
+            }
+
+            // Create and register the subscription
+            String subId = idGenerator.nextSubscriptionId();
+            UserSubscription subscription = new UserSubscription(
+                    subId,
+                    userId,
+                    planId,
+                    tierLevel,
+                    plan.getBillingCycle().getDays(), // duration of the subscription: 30/90/365 days
+                    paymentContext
+            );
+
+            // Registers as both the user's current subscription and a permanent history entry
+            subscriptionRepository.save(subscription);
+
+            return subscription;
+        } finally {
+            lock.unlock();
         }
-
-        // A user may only have one usable subscription at a time; a past (expired/cancelled)
-        // one does not block a new subscribe call
-        Optional<UserSubscription> existingSub = subscriptionRepository.findActiveByUserId(userId);
-        if (existingSub.isPresent() && !existingSub.get().isExpired()) {
-            throw new IllegalStateException("User already has an active subscription: " + existingSub.get().getSubscriptionId());
-        }
-
-        // Execute payment
-        PaymentContext paymentContext = processPayment(userId, plan.getPrice(), paymentMethod, "Subscribe to " + plan.getName());
-
-        // Guard: payment must succeed before the subscription is created
-        if (!PAYMENT_SUCCESS.equalsIgnoreCase(paymentContext.status())) {
-            throw new PaymentFailedException("Subscription failed: Payment processing failed for user " + userId);
-        }
-
-        // Create and register the subscription
-        String subId = idGenerator.nextSubscriptionId();
-        UserSubscription subscription = new UserSubscription(
-                subId,
-                userId,
-                planId,
-                tierLevel,
-                plan.getBillingCycle().getDays(), // duration of the subscription: 30/90/365 days
-                paymentContext
-        );
-
-        // Registers as both the user's current subscription and a permanent history entry
-        subscriptionRepository.save(subscription);
-
-        return subscription;
     }
 
     /** Mock payment execution: any non-negative amount succeeds. Also writes the audit log entry. */
@@ -140,79 +154,107 @@ public class MembershipService {
      * matches what the user qualifies for.
      */
     public Optional<UserSubscription> evaluateAndUpdateUserTier(UserMetrics metrics) {
-        Optional<UserSubscription> maybeSub = subscriptionRepository.findActiveByUserId(metrics.userId());
+        // Locked so this doesn't race with a manual changeTierManual() (or another automatic
+        // evaluation) reading the same stale tier and silently overwriting each other's result.
+        ReentrantLock lock = userLockManager.lockFor(metrics.userId());
+        lock.lock();
+        try {
+            Optional<UserSubscription> maybeSub = subscriptionRepository.findActiveByUserId(metrics.userId());
 
-        // Nothing to re-evaluate if the user isn't currently subscribed
-        if (maybeSub.isEmpty() || maybeSub.get().isExpired()) {
-            System.out.printf("[TIER EVALUATION] Skip evaluation: No active subscription for user %s%n", metrics.userId());
-            return Optional.empty();
+            // Nothing to re-evaluate if the user isn't currently subscribed
+            if (maybeSub.isEmpty() || maybeSub.get().isExpired()) {
+                System.out.printf("[TIER EVALUATION] Skip evaluation: No active subscription for user %s%n", metrics.userId());
+                return Optional.empty();
+            }
+
+            UserSubscription sub = maybeSub.get();
+            TierLevel currentTier = sub.getTierLevel();
+            TierLevel qualifiedTier = evaluateEligibleTier(metrics);
+
+            if (currentTier != qualifiedTier) {
+                // Rank comparison tells us whether this move is an upgrade or a downgrade
+                String transitionType = qualifiedTier.getRank() > currentTier.getRank() ? "UPGRADE" : "DOWNGRADE";
+
+                sub.updateTier(qualifiedTier);
+
+                System.out.printf("[TIER CHANGE LOG] User: %s | Action: %s | From: %s -> To: %s | Reason: Orders=%d, Spend=$%s%n",
+                        metrics.userId(), transitionType, currentTier, qualifiedTier,
+                        metrics.monthlyOrderCount(), metrics.monthlyOrderValue());
+            } else {
+                // Still qualifies for the same tier - nothing changes, just log it
+                System.out.printf("[TIER EVALUATION] User: %s | Retained Tier: %s%n", metrics.userId(), currentTier);
+            }
+
+            return Optional.of(sub);
+        } finally {
+            lock.unlock();
         }
-
-        UserSubscription sub = maybeSub.get();
-        TierLevel currentTier = sub.getTierLevel();
-        TierLevel qualifiedTier = evaluateEligibleTier(metrics);
-
-        if (currentTier != qualifiedTier) {
-            // Rank comparison tells us whether this move is an upgrade or a downgrade
-            String transitionType = qualifiedTier.getRank() > currentTier.getRank() ? "UPGRADE" : "DOWNGRADE";
-
-            sub.updateTier(qualifiedTier);
-
-            System.out.printf("[TIER CHANGE LOG] User: %s | Action: %s | From: %s -> To: %s | Reason: Orders=%d, Spend=$%s%n",
-                    metrics.userId(), transitionType, currentTier, qualifiedTier,
-                    metrics.monthlyOrderCount(), metrics.monthlyOrderValue());
-        } else {
-            // Still qualifies for the same tier - nothing changes, just log it
-            System.out.printf("[TIER EVALUATION] User: %s | Retained Tier: %s%n", metrics.userId(), currentTier);
-        }
-
-        return Optional.of(sub);
     }
 
     /** Manual tier change requested directly by the user (not driven by metrics evaluation). */
     public UserSubscription changeTierManual(String userId, TierLevel newTier) {
-        UserSubscription sub = subscriptionRepository.findActiveByUserId(userId)
-                .filter(s -> !s.isExpired())
-                .orElseThrow(() -> new IllegalStateException("No active subscription found for user: " + userId));
+        // Locked for the same reason as evaluateAndUpdateUserTier: read-current-tier then
+        // write-new-tier must be atomic with respect to other operations on this user.
+        ReentrantLock lock = userLockManager.lockFor(userId);
+        lock.lock();
+        try {
+            UserSubscription sub = subscriptionRepository.findActiveByUserId(userId)
+                    .filter(s -> !s.isExpired())
+                    .orElseThrow(() -> new IllegalStateException("No active subscription found for user: " + userId));
 
-        TierLevel oldTier = sub.getTierLevel();
-        if (oldTier == newTier) {
-            // Already at the requested tier - nothing to do
+            TierLevel oldTier = sub.getTierLevel();
+            if (oldTier == newTier) {
+                // Already at the requested tier - nothing to do
+                return sub;
+            }
+
+            String action = newTier.getRank() > oldTier.getRank() ? "UPGRADE" : "DOWNGRADE";
+            System.out.printf("[MANUAL TIER LOG] User: %s | %s from %s to %s%n", userId, action, oldTier, newTier);
+
+            sub.updateTier(newTier);
             return sub;
+        } finally {
+            lock.unlock();
         }
-
-        String action = newTier.getRank() > oldTier.getRank() ? "UPGRADE" : "DOWNGRADE";
-        System.out.printf("[MANUAL TIER LOG] User: %s | %s from %s to %s%n", userId, action, oldTier, newTier);
-
-        sub.updateTier(newTier);
-        return sub;
     }
 
     /** Looks up the user's current subscription, lazily marking it EXPIRED if its end date has passed. */
     public Optional<UserSubscription> getSubscription(String userId) {
-        Optional<UserSubscription> maybeSub = subscriptionRepository.findActiveByUserId(userId);
-        if (maybeSub.isEmpty()) {
-            return Optional.empty();
+        ReentrantLock lock = userLockManager.lockFor(userId);
+        lock.lock();
+        try {
+            Optional<UserSubscription> maybeSub = subscriptionRepository.findActiveByUserId(userId);
+            if (maybeSub.isEmpty()) {
+                return Optional.empty();
+            }
+
+            UserSubscription sub = maybeSub.get();
+
+            // Lazy expiry: nothing runs on a timer, so any read is where we detect
+            // and record that the subscription's period has ended
+            if (LocalDateTime.now().isAfter(sub.getEndDate()) && sub.getStatus() == SubscriptionStatus.ACTIVE) {
+                sub.setStatus(SubscriptionStatus.EXPIRED);
+            }
+
+            return Optional.of(sub);
+        } finally {
+            lock.unlock();
         }
-
-        UserSubscription sub = maybeSub.get();
-
-        // Lazy expiry: nothing runs on a timer, so any read is where we detect
-        // and record that the subscription's period has ended
-        if (LocalDateTime.now().isAfter(sub.getEndDate()) && sub.getStatus() == SubscriptionStatus.ACTIVE) {
-            sub.setStatus(SubscriptionStatus.EXPIRED);
-        }
-
-        return Optional.of(sub);
     }
 
     public void cancelSubscription(String userId) {
-        UserSubscription sub = subscriptionRepository.findActiveByUserId(userId)
-                .orElseThrow(() -> new IllegalStateException("No subscription found for user: " + userId));
+        ReentrantLock lock = userLockManager.lockFor(userId);
+        lock.lock();
+        try {
+            UserSubscription sub = subscriptionRepository.findActiveByUserId(userId)
+                    .orElseThrow(() -> new IllegalStateException("No subscription found for user: " + userId));
 
-        // Marks the subscription CANCELLED; endDate is left untouched
-        sub.cancel();
-        System.out.printf("[SUBSCRIPTION LOG] Cancelled subscription %s for user %s%n", sub.getSubscriptionId(), userId);
+            // Marks the subscription CANCELLED; endDate is left untouched
+            sub.cancel();
+            System.out.printf("[SUBSCRIPTION LOG] Cancelled subscription %s for user %s%n", sub.getSubscriptionId(), userId);
+        } finally {
+            lock.unlock();
+        }
     }
 
     // ---------------------------------------------------------------
