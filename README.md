@@ -70,6 +70,7 @@ Build a membership system with:
   - **Tier qualification** (`rule` package) — a tier holds a list of `TierQualificationRule`s; a user qualifies if *any* rule passes.
   - **Tier benefits** (`benefit` package) — a tier holds a list of `MembershipBenefit`s; each one is applied to an order and accumulates its effect (discount, free delivery, entitlement flags) into one result.
 - **Constructor injection everywhere** — `MembershipService` depends on repository *interfaces*, not concrete storage, so the in-memory implementations can be swapped for real ones later.
+- **Per-user locking for state changes** — `UserLockManager` gives each user their own `ReentrantLock`; every method that reads-then-writes one user's subscription holds that lock for the whole operation, closing races like two concurrent `subscribe()` calls both charging the same user.
 - Adding a new qualification rule or a new benefit type means adding one new class that implements an existing interface — nothing else in the codebase changes.
 
 ---
@@ -114,6 +115,7 @@ Supporting packages: `model` (small immutable data carriers — `UserMetrics`, `
 | `benefit` | Tier benefit Strategy: `MembershipBenefit` + `PercentageDiscountBenefit`, `FreeDeliveryBenefit`, `EarlyAccessBenefit`, `PrioritySupportBenefit` |
 | `repository` | Storage interfaces (`PlanRepository`, `TierRepository`, `SubscriptionRepository`, `PaymentLogRepository`) + in-memory implementations |
 | `service` | `MembershipService` — the single orchestrator; all mutations and queries go through it |
+| `concurrency` | `UserLockManager` — one `ReentrantLock` per user, so state-changing operations for that user serialize |
 | `store` | `IdGenerator` — sequential IDs for plans/tiers/subscriptions/payments |
 | `config` | `CatalogSeeder` — builds the demo catalog (plans, tiers, criteria, benefits), shared by `Application` and the tests |
 | `exception` | `PaymentFailedException` |
@@ -214,7 +216,7 @@ public OrderBenefitsResult evaluateBenefits(String userId, OrderContext context)
 
 ### 4.4 Service layer — `MembershipService`
 
-Constructor-injected with four repository interfaces + `IdGenerator` (no concrete storage type is ever referenced):
+Constructor-injected with four repository interfaces + `IdGenerator` + `UserLockManager` (no concrete storage type is ever referenced):
 
 | Method | What it does |
 |---|---|
@@ -230,7 +232,35 @@ Constructor-injected with four repository interfaces + `IdGenerator` (no concret
 
 Note: `subscribe()` and `changeTierManual()` do **not** check `MembershipTier.qualifies()` — a user can self-select any tier the catalog offers, regardless of whether their metrics would qualify them for it. Only `evaluateAndUpdateUserTier()` (the automatic path) respects the criteria. This is a deliberate simplification worth knowing about, not an oversight.
 
-### 4.5 Storage — Repository pattern
+### 4.5 Concurrency — per-user locking
+
+Every method that reads a user's subscription and then decides + writes based on what it read holds that user's lock for the entire operation, acquired from `UserLockManager.lockFor(userId)`:
+
+```java
+ReentrantLock lock = userLockManager.lockFor(userId);
+lock.lock();
+try {
+    // read current state -> decide -> write
+} finally {
+    lock.unlock();
+}
+```
+
+| Method | Why it's locked |
+|---|---|
+| `subscribe()` | Without it, two concurrent calls for the same user could both pass the "no active subscription" check and both charge + create a subscription before either writes (double charge). |
+| `evaluateAndUpdateUserTier()` | Read-current-tier → decide → write-new-tier isn't atomic on its own; a concurrent `changeTierManual()` could read the same stale tier and one of the two writes would be silently lost. |
+| `changeTierManual()` | Same read-decide-write race as above, from the manual side. |
+| `getSubscription()` | Its lazy-expiry write (`ACTIVE` → `EXPIRED`) shouldn't race with a concurrent cancel or tier change on the same subscription. |
+| `cancelSubscription()` | Consistency with the others - state changes for one user should all serialize the same way. |
+
+**Not locked** (deliberately): `getPlansAndTiers()`, `evaluateEligibleTier()`, `getBenefits()`, `evaluateBenefits()` — none of these mutate per-user subscription state, so locking them would only add contention with no correctness benefit.
+
+`UserLockManager` hands out one `ReentrantLock` per userId (lazily created via `ConcurrentHashMap.computeIfAbsent`), so different users never block each other - only concurrent operations on the *same* user serialize.
+
+Proven, not just asserted: `UserLockManagerTest` runs 50 threads incrementing a shared counter under the same user's lock (would lose updates without it) and confirms two different users' locks don't block each other. `MembershipServiceConcurrencyTest` fires 50 concurrent `subscribe()` calls at the same user through the real service and asserts exactly 1 succeeds and 49 get `IllegalStateException` - the actual race this mechanism exists to close.
+
+### 4.6 Storage — Repository pattern
 
 ```
 <<interface>> PlanRepository          <<interface>> TierRepository
@@ -244,36 +274,40 @@ InMemoryPlanRepository                InMemoryTierRepository
 
 Same shape for `SubscriptionRepository` (`findActiveByUserId` / `save` — internally keeps the active-by-user map and a permanent history-by-subscription-id map) and `PaymentLogRepository` (write-only audit log). Every repository is an interface + one in-memory implementation, so a real persistence layer (JPA, etc.) can be dropped in later by writing a new implementation class — `MembershipService` would not change.
 
-### 4.6 Flow: subscribing a user (sequence)
+### 4.7 Flow: subscribing a user (sequence)
 
 ```
 Application/caller
    │  subscribe(userId, planId, tier, method)
    ▼
 MembershipService
+   │  userLockManager.lockFor(userId).lock()    ──► acquire this user's lock
    │  planRepository.findById(planId)          ──► 404-style IllegalArgumentException if missing
    │  tierRepository.findByLevel(tier)          ──► IllegalArgumentException if not offered
    │  subscriptionRepository.findActiveByUserId ──► IllegalStateException if already active
    │  processPayment(...)                       ──► PaymentFailedException if it fails
    │  new UserSubscription(...)
    │  subscriptionRepository.save(subscription)
+   │  lock.unlock()                              ──► always runs, in a finally block
    ▼
 returns UserSubscription
 ```
 
-### 4.7 Flow: automatic tier movement
+### 4.8 Flow: automatic tier movement
 
 ```
 caller has fresh UserMetrics (orders, spend, cohorts)
    │
    ▼
 evaluateAndUpdateUserTier(metrics)
+   │  acquire userLockManager.lockFor(metrics.userId())
    │  no active subscription? → log + return empty, nothing changes
    │  evaluateEligibleTier(metrics)
    │      for each tier: tier.qualifies(metrics)   [OR across that tier's rules]
    │      pick highest-ranked tier that qualifies, else SILVER
    │  current != qualified? → sub.updateTier(qualified), log UPGRADE/DOWNGRADE
    │  else                  → log "retained tier"
+   │  release lock (finally block)
    ▼
 returns the (possibly updated) subscription
 ```
@@ -282,7 +316,7 @@ returns the (possibly updated) subscription
 
 ## 5. Testing
 
-56 JUnit 5 tests across four classes, run with `mvn test`:
+61 JUnit 5 tests across six classes, run with `mvn test`:
 
 | Test class | Covers |
 |---|---|
@@ -290,6 +324,8 @@ returns the (possibly updated) subscription
 | `domain.MembershipTierTest` | `qualifies()`'s OR semantics, baseline tier default |
 | `benefit.MembershipBenefitTest` | Each benefit strategy in isolation (discount math, category restriction, free-delivery threshold, entitlement flags) |
 | `service.MembershipServiceTest` | End-to-end service behavior: catalog, subscribe (all billing cycles, invalid input, duplicate subscription, payment failure), upgrade/downgrade/cancel, lazy expiry, criteria-driven tier movement, full benefits evaluation per tier |
+| `concurrency.UserLockManagerTest` | Same-user lock serializes concurrent critical sections with zero lost updates; different users' locks don't block each other |
+| `service.MembershipServiceConcurrencyTest` | 50 concurrent `subscribe()` calls for the same user through the real service: exactly 1 succeeds, the rest are rejected |
 
 ---
 
@@ -303,7 +339,7 @@ mvn compile                                               # build
 java -cp target/classes com.aman.firstclubmembership2.Application   # run the scripted demo
 ```
 
-The demo (`Application.main`) walks through: subscribing a new user, automatic upgrade to Gold (orders + spend), automatic upgrade to Platinum (via cohort tag alone), tracking current membership, evaluating benefits for a sample order, and cancelling.
+The demo (`Application.main`) walks through every scenario in the problem statement, each section labeled with the requirement it demonstrates: browsing the catalog, evaluating a new user's eligible tier, subscribing, automatic upgrades (via spend/orders, then via cohort tag alone), tracking membership, a manual downgrade followed by a manual upgrade, benefits evaluation for two different tiers against the same order shape (showing the benefits are genuinely tier-differentiated, not just always-on), subscribing to a different billing cycle, and cancelling.
 
 ---
 
