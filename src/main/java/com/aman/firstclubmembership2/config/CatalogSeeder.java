@@ -45,17 +45,20 @@ public final class CatalogSeeder {
     }
 
     private static void seedTiers(TierRepository tierRepository, IdGenerator idGenerator) {
-        // Silver: default baseline tier, no rules required. Flat discount, no free delivery.
+        // Price multiplier on each tier: buying a tier costs plan price x multiplier.
+
+        // Silver: default baseline tier, no rules required. Flat discount, no free delivery. 1.0x price.
         tierRepository.save(new MembershipTier(
                 idGenerator.nextTierId(), TierLevel.SILVER, "Silver Member",
                 List.of(
                         new PercentageDiscountBenefit(new BigDecimal("5"), Set.of())
                 ),
-                List.of()
+                List.of(),
+                new BigDecimal("1.0")
         ));
 
         // Gold: requires >= 5 orders OR >= $2000 total order value (any one rule qualifies).
-        // Discount restricted to selected categories; free delivery above a minimum order value.
+        // Discount restricted to selected categories; free delivery above a minimum order value. 1.5x price.
         tierRepository.save(new MembershipTier(
                 idGenerator.nextTierId(), TierLevel.GOLD, "Gold Member",
                 List.of(
@@ -63,11 +66,12 @@ public final class CatalogSeeder {
                         new FreeDeliveryBenefit(new BigDecimal("499.00")),
                         new EarlyAccessBenefit()
                 ),
-                List.of(new OrderCountRule(5), new OrderValueRule(new BigDecimal("2000.00")))
+                List.of(new OrderCountRule(5), new OrderValueRule(new BigDecimal("2000.00"))),
+                new BigDecimal("1.5")
         ));
 
         // Platinum: requires >= 15 orders OR "VIP_CLUB" cohort tag.
-        // Best discount on all categories, always-free delivery, and the entitlement-only perks.
+        // Best discount on all categories, always-free delivery, and the entitlement-only perks. 2.0x price.
         tierRepository.save(new MembershipTier(
                 idGenerator.nextTierId(), TierLevel.PLATINUM, "Platinum Member",
                 List.of(
@@ -76,7 +80,8 @@ public final class CatalogSeeder {
                         new EarlyAccessBenefit(),
                         new PrioritySupportBenefit()
                 ),
-                List.of(new OrderCountRule(15), new CohortRule("VIP_CLUB"))
+                List.of(new OrderCountRule(15), new CohortRule("VIP_CLUB")),
+                new BigDecimal("2.0")
         ));
     }
 }

@@ -4,6 +4,7 @@ import com.aman.firstclubmembership2.concurrency.UserLockManager;
 import com.aman.firstclubmembership2.config.CatalogSeeder;
 import com.aman.firstclubmembership2.domain.UserSubscription;
 import com.aman.firstclubmembership2.enums.TierLevel;
+import com.aman.firstclubmembership2.pricing.MultiplierTierPricingStrategy;
 import com.aman.firstclubmembership2.repository.InMemoryPaymentLogRepository;
 import com.aman.firstclubmembership2.repository.InMemoryPlanRepository;
 import com.aman.firstclubmembership2.repository.InMemorySubscriptionRepository;
@@ -42,7 +43,8 @@ class MembershipServiceConcurrencyTest {
 
         CatalogSeeder.seed(planRepository, tierRepository, idGenerator);
 
-        service = new MembershipService(planRepository, tierRepository, subscriptionRepository, paymentLogRepository, idGenerator, userLockManager);
+        service = new MembershipService(planRepository, tierRepository, subscriptionRepository, paymentLogRepository,
+                idGenerator, userLockManager, new MultiplierTierPricingStrategy());
     }
 
     @Test
@@ -84,7 +86,7 @@ class MembershipServiceConcurrencyTest {
         assertEquals(threadCount - 1, conflictCount.get(), "every other call should see an active subscription and be rejected");
 
         UserSubscription current = service.getSubscription("USER_RACE").orElseThrow();
-        assertEquals(TierLevel.SILVER, current.getTierLevel());
+        assertEquals(TierLevel.SILVER, current.getEffectiveTier());
     }
 
     private static void await(CountDownLatch latch) {

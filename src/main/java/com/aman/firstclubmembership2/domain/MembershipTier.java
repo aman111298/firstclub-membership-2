@@ -5,6 +5,7 @@ import com.aman.firstclubmembership2.enums.TierLevel;
 import com.aman.firstclubmembership2.model.UserMetrics;
 import com.aman.firstclubmembership2.rule.TierQualificationRule;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 public class MembershipTier {
@@ -14,14 +15,22 @@ public class MembershipTier {
     private final String name;
     private final List<MembershipBenefit> benefits;
     private final List<TierQualificationRule> qualificationRules;
+    private final BigDecimal priceMultiplier;
 
+    /** Tier priced at 1.0x the plan price. */
     public MembershipTier(String tierId, TierLevel level, String name, List<MembershipBenefit> benefits,
                            List<TierQualificationRule> qualificationRules) {
+        this(tierId, level, name, benefits, qualificationRules, BigDecimal.ONE);
+    }
+
+    public MembershipTier(String tierId, TierLevel level, String name, List<MembershipBenefit> benefits,
+                           List<TierQualificationRule> qualificationRules, BigDecimal priceMultiplier) {
         this.tierId = tierId;
         this.level = level;
         this.name = name;
         this.benefits = List.copyOf(benefits);
         this.qualificationRules = List.copyOf(qualificationRules);
+        this.priceMultiplier = priceMultiplier;
     }
 
     /** Returns true if at least one rule defined for this tier is satisfied (OR basis). */
@@ -50,5 +59,9 @@ public class MembershipTier {
 
     public List<TierQualificationRule> getQualificationRules() {
         return qualificationRules;
+    }
+
+    public BigDecimal getPriceMultiplier() {
+        return priceMultiplier;
     }
 }

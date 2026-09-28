@@ -15,7 +15,9 @@ import com.aman.firstclubmembership2.enums.TierLevel;
 import com.aman.firstclubmembership2.exception.PaymentFailedException;
 import com.aman.firstclubmembership2.model.OrderBenefitsResult;
 import com.aman.firstclubmembership2.model.OrderContext;
+import com.aman.firstclubmembership2.model.PaymentContext;
 import com.aman.firstclubmembership2.model.UserMetrics;
+import com.aman.firstclubmembership2.pricing.MultiplierTierPricingStrategy;
 import com.aman.firstclubmembership2.repository.InMemoryPaymentLogRepository;
 import com.aman.firstclubmembership2.repository.InMemoryPlanRepository;
 import com.aman.firstclubmembership2.repository.InMemorySubscriptionRepository;
@@ -31,6 +33,7 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -48,6 +51,7 @@ class MembershipServiceTest {
     private SubscriptionRepository subscriptionRepository;
     private PaymentLogRepository paymentLogRepository;
     private UserLockManager userLockManager;
+    private List<PaymentContext> payments;
     private MembershipService service;
 
     @BeforeEach
@@ -56,12 +60,18 @@ class MembershipServiceTest {
         planRepository = new InMemoryPlanRepository();
         tierRepository = new InMemoryTierRepository();
         subscriptionRepository = new InMemorySubscriptionRepository();
-        paymentLogRepository = new InMemoryPaymentLogRepository();
+        payments = new ArrayList<>();
+        paymentLogRepository = payments::add; // captures every charge so tests can assert amounts
         userLockManager = new UserLockManager();
 
         CatalogSeeder.seed(planRepository, tierRepository, idGenerator);
 
-        service = new MembershipService(planRepository, tierRepository, subscriptionRepository, paymentLogRepository, idGenerator, userLockManager);
+        service = new MembershipService(planRepository, tierRepository, subscriptionRepository, paymentLogRepository,
+                idGenerator, userLockManager, new MultiplierTierPricingStrategy());
+    }
+
+    private BigDecimal lastChargedAmount() {
+        return payments.get(payments.size() - 1).amount();
     }
 
     private static UserMetrics metrics(int orderCount, String orderValue, String... cohorts) {
@@ -108,7 +118,7 @@ class MembershipServiceTest {
         UserSubscription sub = service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER, "CREDIT_CARD");
 
         assertEquals(SubscriptionStatus.ACTIVE, sub.getStatus());
-        assertEquals(TierLevel.SILVER, sub.getTierLevel());
+        assertEquals(TierLevel.SILVER, sub.getEffectiveTier());
         assertEquals("SUCCESS", sub.getPaymentContext().status());
         assertDurationDays(sub.getStartDate(), sub.getEndDate(), 30);
     }
@@ -145,7 +155,8 @@ class MembershipServiceTest {
         TierRepository sparseTiers = new InMemoryTierRepository();
         sparseTiers.save(new MembershipTier(idGenerator.nextTierId(), TierLevel.SILVER, "Silver", List.of(), List.of()));
         MembershipService sparseService = new MembershipService(
-                sparsePlans, sparseTiers, new InMemorySubscriptionRepository(), new InMemoryPaymentLogRepository(), idGenerator, userLockManager);
+                sparsePlans, sparseTiers, new InMemorySubscriptionRepository(), new InMemoryPaymentLogRepository(), idGenerator, userLockManager,
+                new MultiplierTierPricingStrategy());
 
         assertThrows(IllegalArgumentException.class,
                 () -> sparseService.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.GOLD, "CREDIT_CARD"));
@@ -178,61 +189,105 @@ class MembershipServiceTest {
         assertTrue(service.getSubscription("USER_1").isEmpty());
     }
 
-    /**
-     * Characterization test: subscribe() currently does not check MembershipTier.qualifies()
-     * against the user's metrics - it only checks that the tier exists in the catalog. A user
-     * can self-select Platinum with zero orders and no cohort. See conversation notes on
-     * whether eligibility should gate tier selection at subscribe time.
-     */
+    // ---------------------------------------------------------------
+    // Tier pricing: plan price x tier multiplier
+    // ---------------------------------------------------------------
+
     @Test
-    void subscribe_currentlyDoesNotEnforceTierEligibilityCriteria() {
+    void getPrice_isPlanPriceTimesTierMultiplier() {
+        assertEquals(new BigDecimal("199.00"), service.getPrice(CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER));
+        assertEquals(new BigDecimal("298.50"), service.getPrice(CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.GOLD));
+        assertEquals(new BigDecimal("3998.00"), service.getPrice(CatalogSeeder.YEARLY_PLAN_ID, TierLevel.PLATINUM));
+    }
+
+    @Test
+    void subscribe_chargesPlanPlusTierPrice() {
+        UserSubscription sub = service.subscribe("USER_1", CatalogSeeder.QUARTERLY_PLAN_ID, TierLevel.GOLD, "CREDIT_CARD");
+
+        assertEquals(new BigDecimal("823.50"), sub.getPaymentContext().amount());
+    }
+
+    @Test
+    void subscribe_givesExactlyThePurchasedTier_withoutEvaluatingCriteria() {
+        // A new user with no activity can still buy Platinum - buying is separate from earning.
         UserSubscription sub = service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.PLATINUM, "CREDIT_CARD");
 
-        assertEquals(TierLevel.PLATINUM, sub.getTierLevel());
+        assertEquals(TierLevel.PLATINUM, sub.getPurchasedTier());
+        assertEquals(null, sub.getEarnedTier(), "no evaluation runs at purchase time");
+        assertEquals(TierLevel.PLATINUM, sub.getEffectiveTier());
     }
 
     // ---------------------------------------------------------------
-    // Requirement 3: Upgrade / downgrade a subscription's tier
+    // Requirement 3: Upgrade (user, paid) / downgrade (admin penalty)
     // ---------------------------------------------------------------
 
     @Test
-    void changeTierManual_toHigherTier_upgradesSubscription() {
+    void upgradeTier_raisesPurchasedTier_andChargesProratedDifference() {
         service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER, "CREDIT_CARD");
 
-        UserSubscription upgraded = service.changeTierManual("USER_1", TierLevel.GOLD);
+        UserSubscription upgraded = service.upgradeTier("USER_1", TierLevel.GOLD, "CREDIT_CARD");
 
-        assertEquals(TierLevel.GOLD, upgraded.getTierLevel());
+        assertEquals(TierLevel.GOLD, upgraded.getPurchasedTier());
+        assertEquals(TierLevel.GOLD, upgraded.getEffectiveTier());
+        // Upgraded right after buying, so almost the whole period remains: ~ (298.50 - 199.00)
+        assertEquals(new BigDecimal("99.50"), lastChargedAmount());
     }
 
     @Test
-    void changeTierManual_toLowerTier_downgradesSubscription() {
-        service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.PLATINUM, "CREDIT_CARD");
-
-        UserSubscription downgraded = service.changeTierManual("USER_1", TierLevel.SILVER);
-
-        assertEquals(TierLevel.SILVER, downgraded.getTierLevel());
-    }
-
-    @Test
-    void changeTierManual_sameTier_isNoOp() {
+    void upgradeTier_toSameOrLowerTier_throwsIllegalArgumentException() {
         service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.GOLD, "CREDIT_CARD");
 
-        UserSubscription result = service.changeTierManual("USER_1", TierLevel.GOLD);
-
-        assertEquals(TierLevel.GOLD, result.getTierLevel());
+        assertThrows(IllegalArgumentException.class, () -> service.upgradeTier("USER_1", TierLevel.GOLD, "CREDIT_CARD"));
+        assertThrows(IllegalArgumentException.class, () -> service.upgradeTier("USER_1", TierLevel.SILVER, "CREDIT_CARD"));
     }
 
     @Test
-    void changeTierManual_noActiveSubscription_throwsIllegalStateException() {
-        assertThrows(IllegalStateException.class, () -> service.changeTierManual("USER_1", TierLevel.GOLD));
+    void upgradeTier_noActiveSubscription_throwsIllegalStateException() {
+        assertThrows(IllegalStateException.class, () -> service.upgradeTier("USER_1", TierLevel.GOLD, "CREDIT_CARD"));
     }
 
     @Test
-    void changeTierManual_afterCancellation_throwsIllegalStateException() {
+    void upgradeTier_afterCancellation_throwsIllegalStateException() {
         service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER, "CREDIT_CARD");
         service.cancelSubscription("USER_1");
 
-        assertThrows(IllegalStateException.class, () -> service.changeTierManual("USER_1", TierLevel.GOLD));
+        assertThrows(IllegalStateException.class, () -> service.upgradeTier("USER_1", TierLevel.GOLD, "CREDIT_CARD"));
+    }
+
+    @Test
+    void adminDowngradeTier_lowersPurchasedTier_withoutCharging() {
+        service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.PLATINUM, "CREDIT_CARD");
+        int paymentsBefore = payments.size();
+
+        UserSubscription downgraded = service.adminDowngradeTier("USER_1", TierLevel.SILVER);
+
+        assertEquals(TierLevel.SILVER, downgraded.getPurchasedTier());
+        assertEquals(TierLevel.SILVER, downgraded.getEffectiveTier());
+        assertEquals(paymentsBefore, payments.size(), "a penalty downgrade neither charges nor refunds");
+    }
+
+    @Test
+    void adminDowngradeTier_clearsEarnedTier_soThePenaltyTakesEffectImmediately() {
+        service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.GOLD, "CREDIT_CARD");
+        service.reevaluateEarnedTier(metrics(0, "0.00", "VIP_CLUB")); // earned Platinum
+
+        UserSubscription downgraded = service.adminDowngradeTier("USER_1", TierLevel.SILVER);
+
+        assertEquals(null, downgraded.getEarnedTier());
+        assertEquals(TierLevel.SILVER, downgraded.getEffectiveTier());
+    }
+
+    @Test
+    void adminDowngradeTier_toSameOrHigherTier_throwsIllegalArgumentException() {
+        service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.GOLD, "CREDIT_CARD");
+
+        assertThrows(IllegalArgumentException.class, () -> service.adminDowngradeTier("USER_1", TierLevel.GOLD));
+        assertThrows(IllegalArgumentException.class, () -> service.adminDowngradeTier("USER_1", TierLevel.PLATINUM));
+    }
+
+    @Test
+    void adminDowngradeTier_noActiveSubscription_throwsIllegalStateException() {
+        assertThrows(IllegalStateException.class, () -> service.adminDowngradeTier("USER_1", TierLevel.SILVER));
     }
 
     // ---------------------------------------------------------------
@@ -286,7 +341,7 @@ class MembershipServiceTest {
         Optional<UserSubscription> current = service.getSubscription("USER_1");
 
         assertTrue(current.isPresent());
-        assertEquals(TierLevel.GOLD, current.get().getTierLevel());
+        assertEquals(TierLevel.GOLD, current.get().getEffectiveTier());
         assertEquals(SubscriptionStatus.ACTIVE, current.get().getStatus());
     }
 
@@ -326,46 +381,95 @@ class MembershipServiceTest {
     }
 
     @Test
-    void evaluateAndUpdateUserTier_upgradesActiveSubscriptionWhenMetricsImprove() {
+    void reevaluateEarnedTier_liftsEffectiveTierAbovePurchasedWhenMetricsImprove() {
         service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER, "CREDIT_CARD");
 
-        Optional<UserSubscription> result = service.evaluateAndUpdateUserTier(metrics(6, "2500.00"));
+        Optional<UserSubscription> result = service.reevaluateEarnedTier(metrics(6, "2500.00"));
 
         assertTrue(result.isPresent());
-        assertEquals(TierLevel.GOLD, result.get().getTierLevel());
+        assertEquals(TierLevel.SILVER, result.get().getPurchasedTier(), "purchased tier is never touched by evaluation");
+        assertEquals(TierLevel.GOLD, result.get().getEarnedTier());
+        assertEquals(TierLevel.GOLD, result.get().getEffectiveTier());
     }
 
     @Test
-    void evaluateAndUpdateUserTier_downgradesActiveSubscriptionWhenMetricsDrop() {
+    void reevaluateEarnedTier_whenMetricsDrop_neverDowngradesAnEarnedTier() {
+        service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER, "CREDIT_CARD");
+        service.reevaluateEarnedTier(metrics(15, "0.00")); // earned Platinum
+
+        Optional<UserSubscription> result = service.reevaluateEarnedTier(metrics(0, "0.00"));
+
+        assertEquals(TierLevel.PLATINUM, result.orElseThrow().getEarnedTier());
+        assertEquals(TierLevel.PLATINUM, result.orElseThrow().getEffectiveTier(), "only an admin can downgrade");
+    }
+
+    @Test
+    void reevaluateEarnedTier_neverDropsBelowThePurchasedTier() {
         service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.PLATINUM, "CREDIT_CARD");
 
-        Optional<UserSubscription> result = service.evaluateAndUpdateUserTier(metrics(0, "0.00"));
+        Optional<UserSubscription> result = service.reevaluateEarnedTier(metrics(0, "0.00"));
 
-        assertTrue(result.isPresent());
-        assertEquals(TierLevel.SILVER, result.get().getTierLevel());
+        assertEquals(null, result.orElseThrow().getEarnedTier(), "lower qualification is not recorded");
+        assertEquals(TierLevel.PLATINUM, result.orElseThrow().getEffectiveTier());
     }
 
     @Test
-    void evaluateAndUpdateUserTier_noChangeWhenAlreadyAtQualifiedTier() {
+    void reevaluateEarnedTier_qualifyingForThePurchasedTierOnly_changesNothing() {
+        service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.GOLD, "CREDIT_CARD");
+
+        Optional<UserSubscription> result = service.reevaluateEarnedTier(metrics(6, "0.00")); // qualifies Gold
+
+        assertEquals(null, result.orElseThrow().getEarnedTier());
+        assertEquals(TierLevel.GOLD, result.orElseThrow().getEffectiveTier());
+    }
+
+    @Test
+    void reevaluateEarnedTier_neverCharges() {
         service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER, "CREDIT_CARD");
+        int paymentsBefore = payments.size();
 
-        Optional<UserSubscription> result = service.evaluateAndUpdateUserTier(metrics(0, "0.00"));
+        service.reevaluateEarnedTier(metrics(0, "0.00", "VIP_CLUB"));
 
-        assertTrue(result.isPresent());
-        assertEquals(TierLevel.SILVER, result.get().getTierLevel());
+        assertEquals(paymentsBefore, payments.size());
     }
 
     @Test
-    void evaluateAndUpdateUserTier_noActiveSubscription_returnsEmpty() {
-        assertTrue(service.evaluateAndUpdateUserTier(metrics(6, "2500.00")).isEmpty());
+    void reevaluateEarnedTier_noActiveSubscription_returnsEmpty() {
+        assertTrue(service.reevaluateEarnedTier(metrics(6, "2500.00")).isEmpty());
     }
 
     @Test
-    void evaluateAndUpdateUserTier_afterCancellation_returnsEmpty() {
+    void reevaluateEarnedTier_afterCancellation_returnsEmpty() {
         service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER, "CREDIT_CARD");
         service.cancelSubscription("USER_1");
 
-        assertFalse(service.evaluateAndUpdateUserTier(metrics(6, "2500.00")).isPresent());
+        assertFalse(service.reevaluateEarnedTier(metrics(6, "2500.00")).isPresent());
+    }
+
+    @Test
+    void reevaluateEarnedTiers_batchUpdatesEverySubscribedUser_andSkipsUnsubscribedOnes() {
+        service.subscribe("USER_A", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER, "CREDIT_CARD");
+        service.subscribe("USER_B", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER, "CREDIT_CARD");
+
+        service.reevaluateEarnedTiers(List.of(
+                new UserMetrics("USER_A", 6, BigDecimal.ZERO, Set.of()),
+                new UserMetrics("USER_B", 0, BigDecimal.ZERO, Set.of("VIP_CLUB")),
+                new UserMetrics("USER_NOT_SUBSCRIBED", 50, BigDecimal.ZERO, Set.of())));
+
+        assertEquals(TierLevel.GOLD, service.getSubscription("USER_A").orElseThrow().getEffectiveTier());
+        assertEquals(TierLevel.PLATINUM, service.getSubscription("USER_B").orElseThrow().getEffectiveTier());
+        assertTrue(service.getSubscription("USER_NOT_SUBSCRIBED").isEmpty());
+    }
+
+    @Test
+    void evaluateBenefits_followEarnedTierWhenItExceedsPurchasedTier() {
+        service.subscribe("USER_1", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER, "CREDIT_CARD");
+        service.reevaluateEarnedTier(metrics(0, "0.00", "VIP_CLUB")); // earned Platinum
+
+        OrderBenefitsResult result = service.evaluateBenefits("USER_1", order("1000.00", "GROCERY", "40.00", false, true));
+
+        assertEquals(new BigDecimal("200.00"), result.getDiscountAmount(), "Platinum's 20%, not Silver's 5%");
+        assertTrue(result.isPrioritySupportGranted());
     }
 
     // ---------------------------------------------------------------
