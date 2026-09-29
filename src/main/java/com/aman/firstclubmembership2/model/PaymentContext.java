@@ -1,5 +1,8 @@
 package com.aman.firstclubmembership2.model;
 
+import com.aman.firstclubmembership2.enums.PaymentMethod;
+import com.aman.firstclubmembership2.enums.PaymentStatus;
+
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
@@ -7,8 +10,8 @@ import java.time.LocalDateTime;
 public record PaymentContext(
         String paymentId,
         BigDecimal amount,
-        String status, // "SUCCESS", "FAILED"
-        String paymentMethod,
+        PaymentStatus status,
+        PaymentMethod paymentMethod,
         LocalDateTime transactionTimestamp
 ) {
 }

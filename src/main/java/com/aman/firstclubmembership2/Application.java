@@ -5,6 +5,7 @@ import com.aman.firstclubmembership2.config.CatalogSeeder;
 import com.aman.firstclubmembership2.domain.MembershipPlan;
 import com.aman.firstclubmembership2.domain.MembershipTier;
 import com.aman.firstclubmembership2.domain.UserSubscription;
+import com.aman.firstclubmembership2.enums.PaymentMethod;
 import com.aman.firstclubmembership2.enums.TierLevel;
 import com.aman.firstclubmembership2.model.OrderBenefitsResult;
 import com.aman.firstclubmembership2.model.OrderContext;
@@ -54,7 +55,7 @@ public class Application {
         // Requirement: "Subscribe to a plan (plan + tier)." - the user pays for exactly the tier
         // they choose; activity criteria are NOT evaluated at purchase time.
         section("2. USER ACTIONS - BUY A PLAN + TIER (MONTHLY + SILVER)");
-        UserSubscription sub = service.subscribe("USER_101", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER, "CREDIT_CARD");
+        UserSubscription sub = service.subscribe("USER_101", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER, PaymentMethod.CREDIT_CARD);
         System.out.println("Active Sub ID: " + sub.getSubscriptionId() + " | Payment ID: " + sub.getPaymentContext().paymentId());
         printTiers(sub);
 
@@ -78,7 +79,7 @@ public class Application {
         // Requirement: "Upgrade ... (Membership Tier)" - a user-initiated, paid upgrade, charged the
         // prorated price difference for the rest of the billing period.
         section("6. USER ACTIONS - PAID UPGRADE OF PURCHASED TIER (SILVER -> GOLD, PRORATED)");
-        service.upgradeTier("USER_101", TierLevel.GOLD, "CREDIT_CARD");
+        service.upgradeTier("USER_101", TierLevel.GOLD, PaymentMethod.CREDIT_CARD);
         printTiers(sub);
 
         // Requirement: "Track current membership and expiry."
@@ -100,7 +101,7 @@ public class Application {
         // discount on selected items or categories. Access to exclusive deals and early
         // access to sales. Priority support for premium members."
         section("9. MEMBERSHIP BENEFITS - CONFIGURED BENEFITS FOR A PURCHASED PLATINUM TIER");
-        service.subscribe("USER_404", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.PLATINUM, "CREDIT_CARD");
+        service.subscribe("USER_404", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.PLATINUM, PaymentMethod.CREDIT_CARD);
         System.out.println("Configured benefits: " + service.getBenefits("USER_404"));
         OrderContext platinumOrder = new OrderContext(new BigDecimal("50.00"), "ELECTRONICS", new BigDecimal("40.00"), true, true);
         OrderBenefitsResult platinumResult = service.evaluateBenefits("USER_404", platinumOrder);
@@ -115,7 +116,7 @@ public class Application {
         // discount doesn't apply outside Gold's configured categories, the order is below
         // Gold's free-delivery threshold, and Gold has no priority-support benefit at all.
         section("10. MEMBERSHIP BENEFITS - SAME ORDER SHAPE, DIFFERENT TIER (GOLD)");
-        service.subscribe("USER_202", CatalogSeeder.QUARTERLY_PLAN_ID, TierLevel.GOLD, "CREDIT_CARD");
+        service.subscribe("USER_202", CatalogSeeder.QUARTERLY_PLAN_ID, TierLevel.GOLD, PaymentMethod.CREDIT_CARD);
         OrderContext goldOrder = new OrderContext(new BigDecimal("100.00"), "GROCERY", new BigDecimal("40.00"), true, true);
         OrderBenefitsResult goldResult = service.evaluateBenefits("USER_202", goldOrder);
         System.out.println("Gold user, GROCERY order $100.00 (below Gold's $499 free-delivery threshold):");
@@ -126,7 +127,7 @@ public class Application {
 
         // Requirement: "Users can choose from Monthly, Quarterly, and Yearly membership plans."
         section("11. MEMBERSHIP PLANS - SUBSCRIBE TO A DIFFERENT BILLING CYCLE");
-        UserSubscription yearlySub = service.subscribe("USER_303", CatalogSeeder.YEARLY_PLAN_ID, TierLevel.SILVER, "CREDIT_CARD");
+        UserSubscription yearlySub = service.subscribe("USER_303", CatalogSeeder.YEARLY_PLAN_ID, TierLevel.SILVER, PaymentMethod.CREDIT_CARD);
         System.out.println("USER_303 subscribed to the Yearly plan, ends: " + yearlySub.getEndDate());
 
         // The scheduled job's batch entry point: re-evaluates every user's earned tier in one run.

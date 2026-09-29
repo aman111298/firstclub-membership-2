@@ -1,5 +1,6 @@
 package com.aman.firstclubmembership2.benefit;
 
+import com.aman.firstclubmembership2.enums.BenefitType;
 import com.aman.firstclubmembership2.model.OrderBenefitsResult;
 import com.aman.firstclubmembership2.model.OrderContext;
 
@@ -7,8 +8,8 @@ import com.aman.firstclubmembership2.model.OrderContext;
 public class EarlyAccessBenefit implements MembershipBenefit {
 
     @Override
-    public String getBenefitCode() {
-        return "EARLY_ACCESS";
+    public BenefitType getType() {
+        return BenefitType.EARLY_ACCESS;
     }
 
     @Override
@@ -21,6 +22,6 @@ public class EarlyAccessBenefit implements MembershipBenefit {
 
     @Override
     public String toString() {
-        return getBenefitCode();
+        return getType().name();
     }
 }

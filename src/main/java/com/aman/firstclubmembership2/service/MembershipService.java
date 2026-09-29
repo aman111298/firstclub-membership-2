@@ -5,7 +5,10 @@ import com.aman.firstclubmembership2.concurrency.UserLockManager;
 import com.aman.firstclubmembership2.domain.MembershipPlan;
 import com.aman.firstclubmembership2.domain.MembershipTier;
 import com.aman.firstclubmembership2.domain.UserSubscription;
+import com.aman.firstclubmembership2.enums.PaymentMethod;
+import com.aman.firstclubmembership2.enums.PaymentStatus;
 import com.aman.firstclubmembership2.enums.SubscriptionStatus;
+import com.aman.firstclubmembership2.enums.TierChangeType;
 import com.aman.firstclubmembership2.enums.TierLevel;
 import com.aman.firstclubmembership2.exception.PaymentFailedException;
 import com.aman.firstclubmembership2.model.OrderBenefitsResult;
@@ -32,9 +35,6 @@ import java.util.Optional;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class MembershipService {
-
-    private static final String PAYMENT_SUCCESS = "SUCCESS";
-    private static final String PAYMENT_FAILED = "FAILED";
 
     private final PlanRepository planRepository;
     private final TierRepository tierRepository;
@@ -78,7 +78,7 @@ public class MembershipService {
      * tier they paid for. Activity criteria are deliberately NOT evaluated here - earning a
      * higher tier happens later, through {@link #reevaluateEarnedTier(UserMetrics)}.
      */
-    public UserSubscription subscribe(String userId, String planId, TierLevel tierLevel, String paymentMethod) {
+    public UserSubscription subscribe(String userId, String planId, TierLevel tierLevel, PaymentMethod paymentMethod) {
         // The whole check-then-act sequence (existing-subscription check, payment, create + save)
         // must run under this user's lock, or two concurrent calls could both pass the check
         // and both charge/create a subscription before either writes.
@@ -102,7 +102,7 @@ public class MembershipService {
                     "Subscribe to " + plan.getName() + " + " + tier.getName());
 
             // Guard: payment must succeed before the subscription is created
-            if (!PAYMENT_SUCCESS.equalsIgnoreCase(paymentContext.status())) {
+            if (paymentContext.status() != PaymentStatus.SUCCESS) {
                 throw new PaymentFailedException("Subscription failed: Payment processing failed for user " + userId);
             }
 
@@ -135,7 +135,7 @@ public class MembershipService {
      *
      * There is no user-facing downgrade - see {@link #adminDowngradeTier(String, TierLevel)}.
      */
-    public UserSubscription upgradeTier(String userId, TierLevel newTier, String paymentMethod) {
+    public UserSubscription upgradeTier(String userId, TierLevel newTier, PaymentMethod paymentMethod) {
         ReentrantLock lock = userLockManager.lockFor(userId);
         lock.lock();
         try {
@@ -156,13 +156,13 @@ public class MembershipService {
                     "Upgrade " + currentTier + " -> " + newTier + " (prorated)");
 
             // Guard: payment must succeed before the tier changes
-            if (!PAYMENT_SUCCESS.equalsIgnoreCase(paymentContext.status())) {
+            if (paymentContext.status() != PaymentStatus.SUCCESS) {
                 throw new PaymentFailedException("Upgrade failed: Payment processing failed for user " + userId);
             }
 
             sub.upgradePurchasedTier(newTier);
-            System.out.printf("[PAID UPGRADE LOG] User: %s | %s -> %s | Charged: $%s%n",
-                    userId, currentTier, newTier, proratedAmount);
+            logTierChange(TierChangeType.PAID_UPGRADE, userId, currentTier, newTier,
+                    "Purchased tier | Charged: $" + proratedAmount);
             return sub;
         } finally {
             lock.unlock();
@@ -190,12 +190,19 @@ public class MembershipService {
                         + currentTier + ", got: " + newTier);
             }
 
+            TierLevel effectiveBefore = sub.getEffectiveTier();
             sub.downgradeByAdmin(newTier);
-            System.out.printf("[ADMIN DOWNGRADE LOG] User: %s | %s -> %s (penalty)%n", userId, currentTier, newTier);
+            logTierChange(TierChangeType.ADMIN_DOWNGRADE, userId, effectiveBefore, sub.getEffectiveTier(),
+                    "Penalty | Purchased: " + currentTier + " -> " + newTier + ", earned tier cleared");
             return sub;
         } finally {
             lock.unlock();
         }
+    }
+
+    /** Single audit format for every tier change, tagged with which path caused it. */
+    private void logTierChange(TierChangeType type, String userId, TierLevel from, TierLevel to, String detail) {
+        System.out.printf("[TIER CHANGE LOG] User: %s | Type: %s | %s -> %s | %s%n", userId, type, from, to, detail);
     }
 
     /** Scales a full-period price difference down to the share of the billing period still remaining. */
@@ -208,12 +215,12 @@ public class MembershipService {
     }
 
     /** Mock payment execution: any non-negative amount succeeds. Also writes the audit log entry. */
-    private PaymentContext processPayment(String userId, BigDecimal amount, String paymentMethod, String description) {
+    private PaymentContext processPayment(String userId, BigDecimal amount, PaymentMethod paymentMethod, String description) {
         String paymentId = idGenerator.nextPaymentLogId();
 
         // Mock gateway: a negative amount is the only way to simulate a failed charge
         boolean isPaymentSuccessful = amount.compareTo(BigDecimal.ZERO) >= 0;
-        String status = isPaymentSuccessful ? PAYMENT_SUCCESS : PAYMENT_FAILED;
+        PaymentStatus status = isPaymentSuccessful ? PaymentStatus.SUCCESS : PaymentStatus.FAILED;
 
         PaymentContext paymentContext = new PaymentContext(
                 paymentId,
@@ -272,9 +279,9 @@ public class MembershipService {
             if (qualifiedTier.getRank() > currentTier.getRank()) {
                 // Criteria qualify the user for a higher tier - upgrade by recording it as earned
                 sub.setEarnedTier(qualifiedTier);
-                System.out.printf("[TIER CHANGE LOG] User: %s | Action: UPGRADE | From: %s -> To: %s | Purchased: %s | Reason: Orders=%d, Spend=$%s%n",
-                        metrics.userId(), currentTier, qualifiedTier, sub.getPurchasedTier(),
-                        metrics.monthlyOrderCount(), metrics.monthlyOrderValue());
+                logTierChange(TierChangeType.EARNED_UPGRADE, metrics.userId(), currentTier, qualifiedTier,
+                        "Purchased: " + sub.getPurchasedTier() + " | Reason: Orders=" + metrics.monthlyOrderCount()
+                                + ", Spend=$" + metrics.monthlyOrderValue());
             } else {
                 // Same or lower qualification - no change; only an admin can downgrade
                 System.out.printf("[TIER EVALUATION] User: %s | Retained Tier: %s (criteria qualify for %s)%n",

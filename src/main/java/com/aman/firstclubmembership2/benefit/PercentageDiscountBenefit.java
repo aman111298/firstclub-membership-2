@@ -1,5 +1,6 @@
 package com.aman.firstclubmembership2.benefit;
 
+import com.aman.firstclubmembership2.enums.BenefitType;
 import com.aman.firstclubmembership2.model.OrderBenefitsResult;
 import com.aman.firstclubmembership2.model.OrderContext;
 
@@ -18,8 +19,8 @@ public class PercentageDiscountBenefit implements MembershipBenefit {
     }
 
     @Override
-    public String getBenefitCode() {
-        return "PERCENT_DISCOUNT_" + discountPercent + "%";
+    public BenefitType getType() {
+        return BenefitType.PERCENT_DISCOUNT;
     }
 
     @Override
@@ -35,6 +36,6 @@ public class PercentageDiscountBenefit implements MembershipBenefit {
 
     @Override
     public String toString() {
-        return getBenefitCode();
+        return getType() + "_" + discountPercent + "%";
     }
 }

@@ -3,6 +3,7 @@ package com.aman.firstclubmembership2.service;
 import com.aman.firstclubmembership2.concurrency.UserLockManager;
 import com.aman.firstclubmembership2.config.CatalogSeeder;
 import com.aman.firstclubmembership2.domain.UserSubscription;
+import com.aman.firstclubmembership2.enums.PaymentMethod;
 import com.aman.firstclubmembership2.enums.TierLevel;
 import com.aman.firstclubmembership2.pricing.MultiplierTierPricingStrategy;
 import com.aman.firstclubmembership2.repository.InMemoryPaymentLogRepository;
@@ -64,7 +65,7 @@ class MembershipServiceConcurrencyTest {
                 readyLatch.countDown();
                 await(startLatch);
                 try {
-                    service.subscribe("USER_RACE", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER, "CREDIT_CARD");
+                    service.subscribe("USER_RACE", CatalogSeeder.MONTHLY_PLAN_ID, TierLevel.SILVER, PaymentMethod.CREDIT_CARD);
                     successCount.incrementAndGet();
                 } catch (IllegalStateException expectedConflict) {
                     conflictCount.incrementAndGet();

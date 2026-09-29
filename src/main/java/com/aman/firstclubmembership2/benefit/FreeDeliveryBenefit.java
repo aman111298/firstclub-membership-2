@@ -1,5 +1,6 @@
 package com.aman.firstclubmembership2.benefit;
 
+import com.aman.firstclubmembership2.enums.BenefitType;
 import com.aman.firstclubmembership2.model.OrderBenefitsResult;
 import com.aman.firstclubmembership2.model.OrderContext;
 
@@ -19,8 +20,8 @@ public class FreeDeliveryBenefit implements MembershipBenefit {
     }
 
     @Override
-    public String getBenefitCode() {
-        return "FREE_DELIVERY_ABOVE_" + minOrderValue;
+    public BenefitType getType() {
+        return BenefitType.FREE_DELIVERY;
     }
 
     @Override
@@ -33,6 +34,6 @@ public class FreeDeliveryBenefit implements MembershipBenefit {
 
     @Override
     public String toString() {
-        return getBenefitCode();
+        return getType() + "_ABOVE_" + minOrderValue;
     }
 }
